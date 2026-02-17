@@ -13,7 +13,21 @@
 # serve to show the default.
 import sys
 import os
-from pkg_resources import get_distribution
+try:
+    from importlib.metadata import version as get_version
+except ImportError:
+    try:
+        from importlib_metadata import version as get_version
+    except ImportError:
+        get_version = None
+
+def get_distribution_version(package_name):
+    if get_version is not None:
+        try:
+            return get_version(package_name)
+        except Exception:
+            pass
+    return '0.0.0'  # Fallback version
 
 import sphinx_readable_theme
 
@@ -59,7 +73,7 @@ author = u'Jannis Leidel'
 # built documents.
 #
 # The full version, including alpha/beta/rc tags.
-release = get_distribution('Flask-RQ2').version
+release = get_distribution_version('Flask-RQ2')
 # The short X.Y version.
 version = '.'.join(release.split('.')[:2])
 
