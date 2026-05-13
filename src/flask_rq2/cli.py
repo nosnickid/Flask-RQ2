@@ -132,10 +132,12 @@ def info(rq, ctx, path, interval, raw, only_queues, only_workers, by_queue,
 @click.option('--pid',
               help='Write the process ID number to a file at '
                    'the specified path')
+@click.option('--with-scheduler', '-s', is_flag=True, help='Run worker with scheduler')
 @click.argument('queues', nargs=-1)
 @rq_command()
 def worker(rq, ctx, burst, logging_level, name, path, results_ttl,
            worker_ttl, verbose, quiet, max_jobs, sentry_dsn, exception_handler, pid,
+           with_scheduler,
            queues):
     "Starts an RQ worker."
     ctx.invoke(
@@ -153,6 +155,7 @@ def worker(rq, ctx, burst, logging_level, name, path, results_ttl,
         exception_handler=exception_handler or rq._exception_handlers,
         pid=pid,
         queues=queues or rq.queues,
+        with_scheduler=with_scheduler,
         **shared_options(rq)
     )
 
