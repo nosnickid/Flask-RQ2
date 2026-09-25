@@ -12,6 +12,7 @@ from functools import update_wrapper
 
 import click
 from rq.cli import cli as rq_cli
+from rq.cli.workers import worker as cli_worker
 from rq.defaults import DEFAULT_RESULT_TTL, DEFAULT_WORKER_TTL
 
 
@@ -141,7 +142,7 @@ def worker(rq, ctx, burst, logging_level, name, path, results_ttl,
            queues):
     "Starts an RQ worker."
     ctx.invoke(
-        rq_cli.worker,
+        cli_worker,
         burst=burst,
         logging_level=logging_level,
         name=name,
