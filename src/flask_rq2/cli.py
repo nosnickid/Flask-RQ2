@@ -1,222 +1,143 @@
-# -*- coding: utf-8 -*-
-"""
-    flask_rq2.cli
-    ~~~~~~~~~~~~~
+from __future__ import annotations
 
-    Support for the Click based Flask CLI via Flask-CLI.
-
-"""
-import operator
-import os
-from functools import update_wrapper
+import typing as t
 
 import click
-from rq.cli import cli as rq_cli
-from rq.defaults import DEFAULT_RESULT_TTL, DEFAULT_WORKER_TTL
+import typing_extensions as te
+from click.decorators import _param_memo
+from flask import Flask
+from flask.cli import ScriptInfo as FlaskScriptInfo
+from rq import cli as orig_cli
+
+from ._worker import run_work_horse
+
+if t.TYPE_CHECKING:
+    from quart import Quart
+    from quart.cli import ScriptInfo as QuartScriptInfo
+
+    from ._extension import RQ
+
+P = te.ParamSpec("P")
+R = t.TypeVar("R")
 
 
-try:
-    from flask.cli import AppGroup, ScriptInfo
-except ImportError:  # pragma: no cover
-    try:
-        from flask_cli import AppGroup, ScriptInfo
-    except ImportError:
-        raise RuntimeError('Cannot import Flask CLI. Is it installed?')
+def make_cli(app: Flask | Quart) -> None:
+    """Create the CLI group and commands, and register it with the app's CLI.
 
-try:
-    from rq_scheduler import Scheduler
-    from rq_scheduler.utils import setup_loghandlers
-except ImportError:  # pragma: no cover
-    Scheduler = None
+    This is needed because Flask and Quart define separate ``AppGroup`` classes,
+    which applies the appropriate ``with_appcontext`` wrapper.
 
-_commands = {}
+    :param app: The app to create the CLI for.
+    """
+    group = app.cli.group("rq")(rq_group)
+    group.command("worker", with_appcontext=True)(worker_cmd)
+    group.command("work-horse", with_appcontext=True, hidden=True)(work_horse_cmd)
+    group.command("cron", with_appcontext=True)(cron_cmd)
+    app.cli.add_command(group)
 
 
-def shared_options(rq):
-    "Default class options to pass to the CLI commands."
-    return {
-        'url': rq.redis_url,
-        'config': None,
-        'worker_class': rq.worker_class,
-        'job_class': rq.job_class,
-        'queue_class': rq.queue_class,
-        'connection_class': rq.connection_class,
-    }
+def from_rq_cmd(
+    base_cmd: click.Command, names: set[str]
+) -> t.Callable[[t.Callable[P, R]], t.Callable[P, R]]:
+    """Create a decorator that applies the named parameters from the original RQ
+    CLI command to the new Flask-RQ CLI command.
+
+    :param base_cmd: The original RQ CLI command.
+    :param names: The parameter names to use.
+    """
+
+    def decorator(f: t.Callable[P, R]) -> t.Callable[P, R]:
+        if not f.__doc__:
+            f.__doc__ = base_cmd.help
+
+        for param in reversed(base_cmd.params):
+            if param.name in names:
+                _param_memo(f, param)
+
+        return f
+
+    return decorator
 
 
-def rq_command(condition=True):
-    def wrapper(func):
-        """Marks a callback as wanting to receive the RQ object we've added
-        to the context
-        """
-        @click.pass_context
-        def new_func(ctx, *args, **kwargs):
-            rq = ctx.obj.data.get('rq')
-            return func(rq, ctx, *args, **kwargs)
-        updated_wrapper = update_wrapper(new_func, func)
-        if condition:
-            _commands[updated_wrapper.__name__] = updated_wrapper
-        return updated_wrapper
-    return wrapper
+@click.pass_context
+def rq_group(ctx: click.Context) -> None:
+    """Flask-RQ worker and queue commands."""
+    script_info: FlaskScriptInfo | QuartScriptInfo = ctx.obj
+    app = script_info.load_app()
+    rq_ext: RQ = app.extensions["rq"]
+    ctx.obj = rq_ext
 
 
-@click.option('--all', '-a', is_flag=True, help='Empty all queues')
-@click.argument('queues', nargs=-1)
-@rq_command()
-def empty(rq, ctx, all, queues):
-    "Empty given queues."
-    return ctx.invoke(
-        rq_cli.empty,
-        all=all,
-        queues=queues or rq.queues,
-        **shared_options(rq)
-    )
-
-
-@click.option('--all', '-a', is_flag=True, help='Requeue all failed jobs')
-@click.argument('job_ids', nargs=-1)
-@rq_command()
-def requeue(rq, ctx, all, job_ids):
-    "Requeue failed jobs."
-    return ctx.invoke(
-        rq_cli.requeue,
-        all=all,
-        job_ids=job_ids,
-        **shared_options(rq)
-    )
-
-
-@click.option('--path', '-P', default='.', help='Specify the import path.')
-@click.option('--interval', '-i', type=float,
-              help='Updates stats every N seconds (default: don\'t poll)')
-@click.option('--raw', '-r', is_flag=True,
-              help='Print only the raw numbers, no bar charts')
-@click.option('--only-queues', '-Q', is_flag=True, help='Show only queue info')
-@click.option('--only-workers', '-W', is_flag=True,
-              help='Show only worker info')
-@click.option('--by-queue', '-R', is_flag=True, help='Shows workers by queue')
-@click.argument('queues', nargs=-1)
-@rq_command()
-def info(rq, ctx, path, interval, raw, only_queues, only_workers, by_queue,
-         queues):
-    "RQ command-line monitor."
-    return ctx.invoke(
-        rq_cli.info,
-        path=path,
-        interval=interval,
-        raw=raw,
-        only_queues=only_queues,
-        only_workers=only_workers,
-        by_queue=by_queue,
-        queues=queues or rq.queues,
-        **shared_options(rq)
-    )
-
-
-@click.option('--burst', '-b', is_flag=True,
-              help='Run in burst mode (quit after all work is done)')
-@click.option('--logging_level', type=str, default="INFO",
-              help='Set logging level')
-@click.option('--name', '-n', help='Specify a different name')
-@click.option('--path', '-P', default='.', help='Specify the import path.')
-@click.option('--results-ttl', type=int, default=DEFAULT_RESULT_TTL,
-              help='Default results timeout to be used')
-@click.option('--worker-ttl', type=int, default=DEFAULT_WORKER_TTL,
-              help='Default worker timeout to be used (default: 420)')
-@click.option('--verbose', '-v', is_flag=True, help='Show more output')
-@click.option('--quiet', '-q', is_flag=True, help='Show less output')
-@click.option('--sentry-dsn', default=None, help='Sentry DSN address')
-@click.option('--exception-handler', help='Exception handler(s) to use',
-              multiple=True)
-@click.option('--max-jobs', type=int, default=None, help='Maximum number of jobs to execute')
-@click.option('--pid',
-              help='Write the process ID number to a file at '
-                   'the specified path')
-@click.option('--with-scheduler', '-s', is_flag=True, help='Run worker with scheduler')
-@click.argument('queues', nargs=-1)
-@rq_command()
-def worker(rq, ctx, burst, logging_level, name, path, results_ttl,
-           worker_ttl, verbose, quiet, max_jobs, sentry_dsn, exception_handler, pid,
-           with_scheduler,
-           queues):
-    "Starts an RQ worker."
-    ctx.invoke(
-        rq_cli.worker,
-        burst=burst,
-        logging_level=logging_level,
+@from_rq_cmd(
+    orig_cli.worker,  # type: ignore[attr-defined]
+    {
+        "burst",
+        "name",
+        "results_ttl",
+        "worker_ttl",
+        "maintenance_interval",
+        "job_monitoring_interval",
+        "max_jobs",
+        "max_idle_time",
+        "with_scheduler",
+        "queues",
+    },
+)
+@click.pass_obj
+def worker_cmd(
+    obj: RQ,
+    burst: bool,
+    name: str | None,
+    results_ttl: int,
+    worker_ttl: int,
+    maintenance_interval: int,
+    job_monitoring_interval: int,
+    max_jobs: int | None,
+    max_idle_time: int | None,
+    with_scheduler: bool,
+    queues: list[str],
+) -> None:
+    worker = obj.make_worker(
+        queues,
         name=name,
-        path=path,
-        results_ttl=results_ttl,
+        default_result_ttl=results_ttl,
         worker_ttl=worker_ttl,
-        verbose=verbose,
-        quiet=quiet,
+        maintenance_interval=maintenance_interval,
+        job_monitoring_interval=job_monitoring_interval,
+    )
+    worker.work(
+        burst=burst,
         max_jobs=max_jobs,
-        sentry_dsn=sentry_dsn,
-        exception_handler=exception_handler or rq._exception_handlers,
-        pid=pid,
-        queues=queues or rq.queues,
+        max_idle_time=max_idle_time,
         with_scheduler=with_scheduler,
-        **shared_options(rq)
     )
 
 
-@rq_command()
-@click.option('--duration', type=int,
-              help='Seconds you want the workers to be suspended. '
-                   'Default is forever.')
-def suspend(rq, ctx, duration):
-    "Suspends all workers."
-    ctx.invoke(
-        rq_cli.suspend,
-        duration=duration,
-        **shared_options(rq)
+@click.argument("queue")
+@click.argument("worker")
+@click.argument("job")
+@click.argument("execution")
+@click.pass_obj
+def work_horse_cmd(
+    obj: RQ,
+    queue: str,
+    worker: str,
+    job: str,
+    execution: str,
+) -> None:
+    """Used by the worker to start a subprocess to run a job. Do not
+    call this directly.
+    """
+    run_work_horse(
+        rq_ext=obj,
+        queue_name=queue,
+        worker_key=worker,
+        job_id=job,
+        execution_id=execution,
     )
 
 
-@rq_command()
-def resume(rq, ctx):
-    "Resumes all workers."
-    ctx.invoke(
-        rq_cli.resume,
-        **shared_options(rq)
-    )
-
-
-@click.option('--verbose', '-v', is_flag=True, help='Show more output')
-@click.option('--burst', '-b', is_flag=True,
-              help='Run in burst mode (quit after all work is done)')
-@click.option('-q', '--queue', metavar='QUEUE',
-              help='The name of the queue to run the scheduler with.')
-@click.option('-i', '--interval', metavar='SECONDS', type=int,
-              help='How often the scheduler checks for new jobs to add to '
-                   'the queue (in seconds, can be floating-point for more '
-                   'precision).')
-@click.option('--pid', metavar='FILE',
-              help='Write the process ID number '
-                   'to a file at the specified path')
-@rq_command(Scheduler is not None)
-def scheduler(rq, ctx, verbose, burst, queue, interval, pid):
-    "Periodically checks for scheduled jobs."
-    scheduler = rq.get_scheduler(interval=interval, queue=queue)
-    if pid:
-        with open(os.path.expanduser(pid), 'w') as fp:
-            fp.write(str(os.getpid()))
-    if verbose:
-        level = 'DEBUG'
-    else:
-        level = 'INFO'
-    setup_loghandlers(level)
-    scheduler.run(burst=burst)
-
-
-def add_commands(cli, rq):
-    @click.group(cls=AppGroup, help='Runs RQ commands with app context.')
-    @click.pass_context
-    def rq_group(ctx):
-        ctx.ensure_object(ScriptInfo).data['rq'] = rq
-
-    sorted_commands = sorted(_commands.items(), key=operator.itemgetter(0))
-    for name, func in sorted_commands:
-        rq_group.command(name=name)(func)
-
-    cli.add_command(rq_group, name='rq')
+@from_rq_cmd(orig_cli.cron, set())  # type: ignore[attr-defined]
+@click.pass_obj
+def cron_cmd(obj: RQ) -> None:
+    obj.make_cron_scheduler().start()  # type: ignore[no-untyped-call]

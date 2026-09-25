@@ -12,6 +12,8 @@ from rq.queue import Queue
 from rq.utils import import_attribute
 from rq.worker import DEFAULT_RESULT_TTL
 
+from .cli import make_cli
+
 try:
     import click
 except ImportError:  # pragma: no cover
@@ -190,7 +192,7 @@ class RQ(object):
         app.extensions['rq2'] = self
 
         if hasattr(app, 'cli'):
-            self.init_cli(app)
+            make_cli(app)
 
     def init_cli(self, app):
         """
